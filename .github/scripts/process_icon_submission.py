@@ -385,6 +385,68 @@ def metadata_matches_submission(
     )
 
 
+def reconcile_icon_pack(
+    metadata: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, int]:
+    retained_metadata: list[dict[str, Any]] = []
+    referenced_pack_files: set[str] = set()
+    referenced_svg_files: set[str] = set()
+    removed_metadata_count = 0
+
+    for entry in metadata:
+        filename = entry.get("Filename")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or Path(filename).name != filename
+        ):
+            removed_metadata_count += 1
+            continue
+
+        pack_file = Path("pack") / filename
+        if pack_file.is_symlink() or not pack_file.is_file():
+            removed_metadata_count += 1
+            continue
+
+        retained_metadata.append(entry)
+        referenced_pack_files.add(filename)
+        source = entry.get("Source")
+        if (
+            isinstance(source, str)
+            and source
+            and Path(source).name == source
+        ):
+            referenced_svg_files.add(source)
+
+    removed_file_count = 0
+    for directory, referenced_files in (
+        (Path("pack"), referenced_pack_files),
+        (Path("svg"), referenced_svg_files),
+    ):
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.name == ".gitkeep":
+                continue
+            if path.is_dir() and not path.is_symlink():
+                continue
+            if path.name not in referenced_files:
+                path.unlink()
+                removed_file_count += 1
+
+    submissions_directory = Path("submissions")
+    if submissions_directory.is_dir():
+        for path in submissions_directory.iterdir():
+            if path.name == ".gitkeep":
+                continue
+            if path.is_dir() and not path.is_symlink():
+                continue
+            path.unlink()
+            removed_file_count += 1
+
+    return retained_metadata, removed_metadata_count, removed_file_count
+
+
 def rebuild_existing_icons(args: argparse.Namespace) -> None:
     metadata_path = Path("metadata.json")
     metadata = read_metadata(metadata_path)
@@ -448,15 +510,19 @@ def rebuild_existing_icons(args: argparse.Namespace) -> None:
         entry["Submission"] = submission.as_posix()
         rebuilt_count += 1
 
-    if rebuilt_count == 0:
-        print("No submitted SVGs matched existing metadata; nothing to rebuild.")
-        return
+    metadata, removed_metadata_count, removed_file_count = reconcile_icon_pack(
+        metadata
+    )
 
     metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"Successfully rebuilt {rebuilt_count} icon(s).")
+    print(
+        f"Rebuilt {rebuilt_count} icon(s), removed "
+        f"{removed_metadata_count} unused metadata record(s), and removed "
+        f"{removed_file_count} unreferenced file(s)."
+    )
 
 
 def process(args: argparse.Namespace) -> None:
