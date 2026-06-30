@@ -30,12 +30,8 @@ We'd love to feature your icons in this pack:
 3. Open a pull request with the **Icon submission** template.
 4. Complete one metadata object in the template for each submitted SVG.
 
-The pull request workflow validates every SVG, assigns a collision-safe
-four-digit ID, converts it to a Compose `ImageVector` with
-[Valkyrie](https://github.com/ComposeGears/Valkyrie), generates an Android
-vector drawable in `xml/`, moves the generated Kotlin source into `pack/`,
-removes the submitted SVG, and updates `metadata.json`. Do not edit generated
-files or metadata manually.
+> [!TIP]
+> If your files is png or jpg, you must convert it using https://www.visioncortex.org/vtracer/
 
 Please ensure every icon is your original work or is properly licensed for
 community redistribution.
