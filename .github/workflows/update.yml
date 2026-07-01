@@ -15,9 +15,6 @@ jobs:
       contents: read
 
     env:
-      VALKYRIE_VERSION: 1.2.0
-      VALKYRIE_SHA256: 58bd9d270706163e1b1c2ac9947e6a200ded302c638ec356ac3c126bf996588c
-      SVG2VECTOR_VERSION: 2.9.1
       ICON_PACKAGE_NAME: moe.rukamori.iconpack
       ICON_RANDOM_DIGITS: 6
 
@@ -42,41 +39,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch submitted SVG history
-        run: |
-          git fetch --no-tags origin \
-            "+refs/pull/*/head:refs/remotes/origin/pull/*"
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install pinned SVG to VectorDrawable converter
-        run: npm install --global "svg2vectordrawable@${SVG2VECTOR_VERSION}"
-
-      - name: Install pinned Valkyrie CLI
-        run: |
-          curl --fail --location --silent --show-error \
-            --output /tmp/valkyrie.zip \
-            "https://github.com/ComposeGears/Valkyrie/releases/download/cli-${VALKYRIE_VERSION}/valkyrie-cli-${VALKYRIE_VERSION}.zip"
-          echo "${VALKYRIE_SHA256}  /tmp/valkyrie.zip" | sha256sum --check --strict
-          unzip -q /tmp/valkyrie.zip -d /tmp/valkyrie
-          chmod +x /tmp/valkyrie/bin/valkyrie
-          /tmp/valkyrie/bin/valkyrie --version
-
       - name: Update all generated icons
         run: |
           python3 .github/scripts/process_icon_submission.py \
             --mode update \
-            --valkyrie /tmp/valkyrie/bin/valkyrie \
-            --s2v "$(command -v s2v)" \
             --package-name "$ICON_PACKAGE_NAME" \
             --random-digits "$ICON_RANDOM_DIGITS"
 

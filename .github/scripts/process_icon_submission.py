@@ -52,8 +52,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--event-path", type=Path)
     parser.add_argument("--base-sha")
-    parser.add_argument("--valkyrie", type=Path, required=True)
-    parser.add_argument("--s2v", type=Path, required=True)
+    parser.add_argument("--valkyrie", type=Path)
+    parser.add_argument("--s2v", type=Path)
     parser.add_argument("--package-name", required=True)
     parser.add_argument("--random-digits", type=int, choices=(6,), default=6)
     return parser.parse_args()
@@ -478,6 +478,58 @@ def renamed_kotlin_content(
         raise SubmissionError(
             f"{source.as_posix()} does not contain its expected generated "
             f'symbol "{previous_symbol}".'
+        )
+    return updated_content
+
+
+def reconciled_kotlin_content(
+    source: Path,
+    expected_symbol: str,
+    package_name: str,
+) -> str:
+    try:
+        content = source.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SubmissionError(
+            f"Cannot read generated Kotlin asset {source.as_posix()}: {error}"
+        ) from error
+
+    package_pattern = re.compile(r"^package\s+\S+\s*$", re.MULTILINE)
+    content, package_count = package_pattern.subn(
+        f"package {package_name}",
+        content,
+        count=1,
+    )
+    if package_count != 1:
+        raise SubmissionError(
+            f"{source.as_posix()} does not contain one Kotlin package declaration."
+        )
+
+    symbol_pattern = re.compile(
+        r"^val\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*ImageVector\b",
+        re.MULTILINE,
+    )
+    symbols = symbol_pattern.findall(content)
+    if len(symbols) != 1:
+        raise SubmissionError(
+            f"{source.as_posix()} does not contain one generated ImageVector "
+            "property."
+        )
+    current_symbol = symbols[0]
+    if current_symbol == expected_symbol:
+        return content
+
+    reference_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(current_symbol)}"
+        rf"(?![A-Za-z0-9_])"
+    )
+    updated_content, replacement_count = reference_pattern.subn(
+        expected_symbol,
+        content,
+    )
+    if replacement_count == 0:
+        raise SubmissionError(
+            f'{source.as_posix()} does not contain symbol "{current_symbol}".'
         )
     return updated_content
 
@@ -953,66 +1005,6 @@ def metadata_matches_submission(
     )
 
 
-def metadata_submission_path(
-    entry: dict[str, Any],
-    identifier: str,
-) -> PurePosixPath:
-    value = entry.get("Submission")
-    if not isinstance(value, str):
-        raise SubmissionError(
-            f'Metadata entry with Id "{identifier}" requires a Submission.'
-        )
-    submission = PurePosixPath(value)
-    if (
-        submission.is_absolute()
-        or len(submission.parts) != 2
-        or submission.parts[0] != "submissions"
-        or submission.suffix.lower() != ".svg"
-        or submission.name in {".svg", ".."}
-    ):
-        raise SubmissionError(
-            f'Metadata entry with Id "{identifier}" has an invalid Submission.'
-        )
-    return submission
-
-
-def restore_submission_from_history(
-    submission: PurePosixPath,
-    destination: Path,
-) -> None:
-    current_submission = Path(submission.as_posix())
-    if current_submission.is_file() and not current_submission.is_symlink():
-        shutil.copyfile(current_submission, destination)
-        return
-
-    revisions = run(
-        "git",
-        "log",
-        "--all",
-        "--format=%H",
-        "--",
-        submission.as_posix(),
-    ).splitlines()
-    for revision in revisions:
-        result = subprocess.run(
-            [
-                "git",
-                "show",
-                f"{revision}:{submission.as_posix()}",
-            ],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        if result.returncode == 0 and result.stdout:
-            destination.write_bytes(result.stdout)
-            return
-
-    raise SubmissionError(
-        f"Cannot restore {submission.as_posix()} from Git history."
-    )
-
-
 def reconcile_icon_pack(
     metadata: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int, int]:
@@ -1172,81 +1164,113 @@ def rebuild_existing_icons(args: argparse.Namespace) -> None:
     )
 
 
+def current_asset_path(
+    directory: Path,
+    declared_filename: str,
+    identifier: str,
+    suffix: str,
+) -> Path:
+    declared_path = directory / declared_filename
+    if declared_path.is_file() and not declared_path.is_symlink():
+        return declared_path
+
+    candidates = [
+        path
+        for path in directory.iterdir() if directory.is_dir()
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix == suffix
+        and path.stem.endswith(identifier)
+    ]
+    if not candidates:
+        raise SubmissionError(
+            f'Cannot find current {suffix} asset for Id "{identifier}".'
+        )
+    if len(candidates) > 1:
+        filenames = ", ".join(sorted(path.name for path in candidates))
+        raise SubmissionError(
+            f'Multiple current {suffix} assets match Id "{identifier}": '
+            f"{filenames}."
+        )
+    return candidates[0]
+
+
 def update_existing_icons(args: argparse.Namespace) -> None:
     metadata_path = Path("metadata.json")
     metadata = read_metadata(metadata_path)
     entries_by_id = metadata_by_id(metadata, "metadata.json")
+    expected_pack_files: set[str] = set()
+    expected_xml_files: set[str] = set()
 
-    with tempfile.TemporaryDirectory(prefix="icon-pack-update-") as temporary_directory:
-        temporary = Path(temporary_directory)
-        source_directory = temporary / "submissions"
-        staged_pack_directory = temporary / "pack"
-        staged_xml_directory = temporary / "xml"
-        source_directory.mkdir()
-        staged_pack_directory.mkdir()
-        staged_xml_directory.mkdir()
+    for identifier, entry in entries_by_id.items():
+        name = metadata_text(entry, "Name", identifier)
+        author = metadata_text(entry, "Author", identifier)
+        declared_kotlin_filename = asset_filename(
+            entry, "Filename", identifier
+        )
+        declared_xml_filename = asset_filename(entry, "Source", identifier)
+        current_kotlin_path = current_asset_path(
+            Path("pack"),
+            declared_kotlin_filename,
+            identifier,
+            ".kt",
+        )
+        current_xml_path = current_asset_path(
+            Path("xml"),
+            declared_xml_filename,
+            identifier,
+            ".xml",
+        )
 
-        expected_pack_files: set[str] = set()
-        expected_xml_files: set[str] = set()
-        restored_submissions: set[str] = set()
-
-        for identifier, entry in entries_by_id.items():
-            name = metadata_text(entry, "Name", identifier)
-            author = metadata_text(entry, "Author", identifier)
-            submission = metadata_submission_path(entry, identifier)
-            normalized_submission = submission.as_posix()
-            if normalized_submission in restored_submissions:
-                raise SubmissionError(
-                    f'Multiple metadata entries reference "{normalized_submission}".'
-                )
-            restored_submissions.add(normalized_submission)
-
-            source = source_directory / f"{identifier}.svg"
-            restore_submission_from_history(submission, source)
-            validate_svg(source)
-
-            generated_name = kotlin_asset_stem(name, author, identifier)
-            kotlin_filename = f"{generated_name}.kt"
-            xml_filename = (
-                f"{xml_asset_stem(name, author, identifier)}.xml"
+        expected_symbol = kotlin_asset_stem(name, author, identifier)
+        expected_kotlin_filename = f"{expected_symbol}.kt"
+        expected_xml_filename = (
+            f"{xml_asset_stem(name, author, identifier)}.xml"
+        )
+        if expected_kotlin_filename in expected_pack_files:
+            raise SubmissionError(
+                f'Duplicate generated Kotlin filename '
+                f'"{expected_kotlin_filename}".'
             )
-            if kotlin_filename in expected_pack_files:
-                raise SubmissionError(
-                    f'Duplicate generated Kotlin filename "{kotlin_filename}".'
-                )
-            if xml_filename in expected_xml_files:
-                raise SubmissionError(
-                    f'Duplicate generated XML filename "{xml_filename}".'
-                )
-            expected_pack_files.add(kotlin_filename)
-            expected_xml_files.add(xml_filename)
-
-            convert_icon(
-                valkyrie=args.valkyrie,
-                source=source,
-                destination=staged_pack_directory / kotlin_filename,
-                generated_name=generated_name,
-                package_name=args.package_name,
+        if expected_xml_filename in expected_xml_files:
+            raise SubmissionError(
+                f'Duplicate generated XML filename "{expected_xml_filename}".'
             )
-            convert_android_vector(
-                s2v=args.s2v,
-                source=source,
-                destination=staged_xml_directory / xml_filename,
+        expected_pack_files.add(expected_kotlin_filename)
+        expected_xml_files.add(expected_xml_filename)
+
+        expected_kotlin_path = Path("pack") / expected_kotlin_filename
+        expected_xml_path = Path("xml") / expected_xml_filename
+        if (
+            expected_kotlin_path != current_kotlin_path
+            and expected_kotlin_path.exists()
+        ):
+            raise SubmissionError(
+                f"Cannot rename {current_kotlin_path.as_posix()} because "
+                f"{expected_kotlin_path.as_posix()} already exists."
+            )
+        if expected_xml_path != current_xml_path and expected_xml_path.exists():
+            raise SubmissionError(
+                f"Cannot rename {current_xml_path.as_posix()} because "
+                f"{expected_xml_path.as_posix()} already exists."
             )
 
-            entry["Id"] = identifier
-            entry["Name"] = name
-            entry["Author"] = author
-            entry["Filename"] = kotlin_filename
-            entry["Source"] = xml_filename
-            entry["Submission"] = normalized_submission
+        updated_kotlin = reconciled_kotlin_content(
+            current_kotlin_path,
+            expected_symbol,
+            args.package_name,
+        )
+        expected_kotlin_path.write_text(updated_kotlin, encoding="utf-8")
+        if expected_kotlin_path != current_kotlin_path:
+            current_kotlin_path.unlink()
+        if expected_xml_path != current_xml_path:
+            current_xml_path.rename(expected_xml_path)
 
-        Path("pack").mkdir(exist_ok=True)
-        Path("xml").mkdir(exist_ok=True)
-        for staged_file in staged_pack_directory.iterdir():
-            shutil.move(staged_file, Path("pack") / staged_file.name)
-        for staged_file in staged_xml_directory.iterdir():
-            shutil.move(staged_file, Path("xml") / staged_file.name)
+        entry["Id"] = identifier
+        entry["Name"] = name
+        entry["Author"] = author
+        entry["Filename"] = expected_kotlin_filename
+        entry["Source"] = expected_xml_filename
 
     metadata, removed_metadata_count, removed_file_count = reconcile_icon_pack(
         metadata
@@ -1270,12 +1294,15 @@ def update_existing_icons(args: argparse.Namespace) -> None:
 def process(args: argparse.Namespace) -> None:
     if not PACKAGE_NAME_PATTERN.fullmatch(args.package_name):
         raise SubmissionError("The configured Kotlin package name is invalid.")
-    if not args.valkyrie.is_file():
-        raise SubmissionError(f"Valkyrie executable not found at {args.valkyrie}.")
-    if not args.s2v.is_file():
-        raise SubmissionError(
-            f"svg2vectordrawable executable not found at {args.s2v}."
-        )
+    if args.mode != "update":
+        if args.valkyrie is None or not args.valkyrie.is_file():
+            raise SubmissionError(
+                f"Valkyrie executable not found at {args.valkyrie}."
+            )
+        if args.s2v is None or not args.s2v.is_file():
+            raise SubmissionError(
+                f"svg2vectordrawable executable not found at {args.s2v}."
+            )
 
     if args.mode == "pull-request":
         process_pull_request(args)
