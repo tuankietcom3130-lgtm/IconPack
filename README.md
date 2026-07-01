@@ -38,12 +38,11 @@ We'd love to feature your icons in this pack:
       "file": "submissions/svgname.svg",
       "link": "ffork url"
     }
+  ]
 }
 ```
-
->[!TIP]
+> [!TIP]
 > if you submit an multiple icon add metadata to each icon:
-
 ```json
 {
   "icons": [
